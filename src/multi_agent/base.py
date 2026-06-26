@@ -128,6 +128,12 @@ class TaskResult(BaseModel):
     output: Dict[str, Any] = Field(default_factory=dict)
     error: Optional[str] = None
     execution_time: float = 0.0  # 执行耗时（秒）
+    confidence: float = 1.0
+    quality_score: Optional[float] = None
+    retryable: bool = False
+    handoff_required: bool = False
+    risk_level: str = "low"
+    reason: str = ""
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 

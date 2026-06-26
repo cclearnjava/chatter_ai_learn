@@ -54,7 +54,7 @@ class HallucinationStepLog(BaseModel):
 # 幻觉检测专用状态（可嵌入到你的核心 AgentState 中）
 class HallucinationDetectionState(BaseModel):
     # 输入：必须由上游节点（如 ChatGenerator）传入
-    context: Optional[Context] = None  # 对话上下文
+    context: Optional[Dict[str, Any]] = None  # 对话上下文
     generated_response: Optional[str] = None  # 生成的自动回复
 
     # 输出：幻觉检测结果
@@ -214,13 +214,23 @@ class AgentState(BaseModel):
     # LangGraph特定字段
     messages: List[Dict[str, Any]] = Field(default_factory=list)
     should_regenerate: bool = False
+    retry_count: int = 0
+    max_retry: int = 2
     final_response: str = ""
     error_message: str = ""
+    handoff_required: bool = False
+    handoff_reason: str = ""
+    risk_level: str = "low"
+    trace_id: str | None = None
     task_completed: bool = False
     subscribe_vip_task: int = SubscribeVIPTask.NOT_COMPLETE
     ai_interrupted: bool = False
     interrupted_reason: str = ""
     fan_profile_summary: Dict[str, Any] = Field(default_factory=dict)
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.trace_id:
+            self.trace_id = self.request_id
 
     def update(self, **kwargs):
         for key, value in kwargs.items():

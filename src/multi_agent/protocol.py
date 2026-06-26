@@ -245,7 +245,10 @@ class MessageBus:
     def get_stats(self) -> Dict[str, Any]:
         """获取消息总线统计"""
         return {
-            "registered_agents": list(self._agents.keys()),
+            "registered_agents": [
+                role.value if hasattr(role, "value") else str(role)
+                for role in self._agents.keys()
+            ],
             "message_count": len(self._message_history),
             "agent_count": len(self._agents)
         }

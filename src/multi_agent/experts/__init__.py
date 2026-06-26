@@ -11,6 +11,7 @@ from src.multi_agent.experts.generator import GeneratorExpert
 from src.multi_agent.experts.reviewer import ReviewerExpert
 from src.multi_agent.experts.safety_guard import SafetyGuardExpert
 from src.multi_agent.experts.faq_expert import FAQExpert
+from src.multi_agent.experts.profile import ProfileExpert
 
 __all__ = [
     "AnalystExpert",
@@ -18,5 +19,6 @@ __all__ = [
     "GeneratorExpert",
     "ReviewerExpert",
     "SafetyGuardExpert",
-    "FAQExpert"
+    "FAQExpert",
+    "ProfileExpert"
 ]

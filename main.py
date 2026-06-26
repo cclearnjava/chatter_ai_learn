@@ -1,5 +1,6 @@
 # main.py
 import asyncio
+import os
 
 import uvicorn
 from contextlib import asynccontextmanager
@@ -10,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 from src.graph.state import AgentState, ChatMessage, MessageItem, BusinessInfo
 from src.graph.workflow import ChatWorkflow
+from src.multi_agent.workflow import MultiAgentChatWorkflow, create_chat_workflow
 from src.core.flow import AutoChatFlow
 from settings.settings import get_settings
 from src.utils.logging_config import setup_logging
@@ -65,7 +67,19 @@ def create_app():
     # ChatWorkflow：负责工作流编排
     # AgentState：负责状态管理
     auto_chat_flow = AutoChatFlow(settings=settings)
-    chat_workflow = ChatWorkflow()
+    
+    # ========== Multi-Agent 模式开关 ==========
+    # WORKFLOW_MODE=multi_agent 启用 Multi-Agent 协作模式
+    # WORKFLOW_MODE=single 使用原有单一工作流
+    workflow_mode = os.getenv("WORKFLOW_MODE", "single").lower()
+    USE_MULTI_AGENT = workflow_mode in {"multi_agent", "multi-agent", "hybrid"}
+    
+    if USE_MULTI_AGENT:
+        chat_workflow = MultiAgentChatWorkflow(settings=settings)
+        logger.info("使用 Multi-Agent 协作模式")
+    else:
+        chat_workflow = ChatWorkflow()
+        logger.info("使用单一工作流模式")
 
     app.state.auto_chat_flow = auto_chat_flow
     app.state.chat_workflow = chat_workflow
@@ -146,6 +160,19 @@ def create_app():
         return JSONResponse(
             status_code=status.HTTP_200_OK,
             content={"health": "ok", "status": "application is running"},
+        )
+    
+    @app.get("/agent-stats")
+    async def get_agent_stats():
+        """获取 Multi-Agent 状态统计（仅 Multi-Agent 模式可用）"""
+        if hasattr(chat_workflow, 'multi_agent_workflow'):
+            return JSONResponse(
+                status_code=status.HTTP_200_OK,
+                content=chat_workflow.multi_agent_workflow.get_stats()
+            )
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={"message": "Not in Multi-Agent mode"}
         )
 
     logger.info("Startup successful!")

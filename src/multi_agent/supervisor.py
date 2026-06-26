@@ -29,7 +29,11 @@ from src.multi_agent.base import (
 )
 from src.multi_agent.protocol import MessageBus, AgentProtocol
 from src.graph.state import AgentState
-from src.services.llm_service import LLMService
+
+try:
+    from src.services.llm_service import LLMService
+except Exception:  # pragma: no cover - optional service in local/dev mode
+    LLMService = None
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +88,7 @@ class SupervisorAgent:
     def __init__(self, message_bus: MessageBus, settings=None):
         self.message_bus = message_bus
         self.settings = settings
-        self.llm_service = LLMService() if settings else None
+        self.llm_service = LLMService() if settings and LLMService else None
         self.logger = logging.getLogger(f"{self.__class__.__name__}")
         
         # 专家能力映射
@@ -236,6 +240,13 @@ class SupervisorAgent:
                 task_type="faq_matching",
                 instruction="在 FAQ 知识库中搜索匹配的答案"
             )
+
+        # 阶段2.5：画像事实约束，避免年龄/性别等强事实被编造
+        plan.add_step(
+            agent=AgentRole.PROFILE_ANALYST,
+            task_type="profile_summary",
+            instruction="提取 creator/fan 已知画像，标记缺失或禁止编造的强事实字段"
+        )
         
         # 阶段3：意图分析
         plan.add_step(
@@ -243,6 +254,7 @@ class SupervisorAgent:
             task_type="intention_analysis",
             instruction="分析用户意图，识别需求类型（内容请求/购买意向/闲聊等）"
         )
+        analyst_step_id = plan.steps[-1]["step_id"]
         
         # 阶段4：内容推荐（条件执行）
         if analysis.get("needs_recommendation", False):
@@ -250,7 +262,7 @@ class SupervisorAgent:
                 agent=AgentRole.RECOMMENDER,
                 task_type="content_recommendation",
                 instruction="基于用户意图和画像，推荐合适的 PPV 内容",
-                depends_on=["step_3"]  # 依赖意图分析
+                depends_on=[analyst_step_id]  # 依赖意图分析
             )
         
         # 阶段5：回复生成
@@ -297,7 +309,7 @@ class SupervisorAgent:
             
             self.logger.info(
                 f"[Supervisor] 执行步骤 {i+1}/{len(plan.steps)}: "
-                f"{step['agent'].value} - {step['task_type']}"
+                f"{self._role_value(step['agent'])} - {step['task_type']}"
             )
             
             # 检查依赖
@@ -307,6 +319,11 @@ class SupervisorAgent:
                     if dep_step and dep_step["status"] != "completed":
                         self.logger.warning(f"依赖步骤未完成: {dep_id}")
             
+            if self._should_skip_step(step, context):
+                step["status"] = "skipped"
+                self.logger.info(f"[Supervisor] 跳过步骤: {step['task_type']}")
+                continue
+
             # 创建任务消息
             message = AgentProtocol.create_task_message(
                 sender=self.role,
@@ -344,6 +361,16 @@ class SupervisorAgent:
         
         plan.status = "completed"
         return results
+
+    def _should_skip_step(self, step: Dict[str, Any], context: CollaborationContext) -> bool:
+        """根据共享上下文跳过不需要执行的步骤。"""
+        if not context.get_shared_context("skip_intention", False):
+            return False
+
+        return step["task_type"] in {
+            "intention_analysis",
+            "content_recommendation",
+        }
     
     async def _should_short_circuit(
         self, 
@@ -354,20 +381,34 @@ class SupervisorAgent:
         """
         检查是否需要提前终止流程
         """
-        # FAQ 匹配成功 → 可以跳过意图分析，直接生成
+        # FAQ 高置信度匹配成功 → 跳过意图/推荐，直接生成和审核
         if step["task_type"] == "faq_matching" and result.success:
             if result.output.get("faq_matched"):
-                context.update_shared_context("skip_intention", True)
-                return False  # 继续但跳过某些步骤
+                confidence = result.output.get("confidence", result.confidence)
+                if confidence >= 0.8:
+                    context.update_shared_context("skip_intention", True)
+                    context.update_shared_context("faq_short_circuited", True)
+                return False
         
         # 输入安全检查失败 → 直接终止
         if step["task_type"] == "input_validation" and not result.success:
             return True
         
         # 质量检查失败 → 需要重试（不终止）
-        if step["task_type"] == "quality_check" and not result.success:
+        if step["task_type"] == "quality_check" and (
+            not result.success or result.output.get("need_regenerate")
+        ):
             context.update_shared_context("need_regenerate", True)
+            context.update_shared_context(
+                "quality_failure_reason",
+                ",".join(result.output.get("issues", [])) or result.reason or result.error or "unknown",
+            )
             return False
+
+        if result.handoff_required:
+            context.update_shared_context("handoff_required", True)
+            context.update_shared_context("handoff_reason", result.reason or result.error or "expert_requested")
+            return True
         
         return False
     
@@ -398,11 +439,28 @@ class SupervisorAgent:
             
             if "final_response" in output:
                 state.final_response = output["final_response"]
+
+            if "known_facts" in output:
+                state.record_data["known_facts"] = output["known_facts"]
+            if "unknown_facts" in output:
+                state.record_data["unknown_facts"] = output["unknown_facts"]
+            if "forbidden_facts" in output:
+                state.record_data["forbidden_facts"] = output["forbidden_facts"]
             
             if "is_safe" in output and not output["is_safe"]:
                 # 内容不安全，使用兜底回复
                 state.final_response = "抱歉，我无法回答这个问题。"
                 state.status = -2
+
+            if result.handoff_required or output.get("handoff_required"):
+                state.handoff_required = True
+                state.handoff_reason = (
+                    result.reason
+                    or output.get("handoff_reason")
+                    or result.error
+                    or "expert_requested"
+                )
+                state.risk_level = result.risk_level
         
         return state
     
@@ -435,6 +493,14 @@ class SupervisorAgent:
         重新规划并执行（用于错误恢复）
         """
         self.logger.info("[Supervisor] 执行重新规划")
+
+        if state.retry_count >= state.max_retry:
+            state.handoff_required = True
+            state.handoff_reason = "quality_check_failed:max_retry_exceeded"
+            state.risk_level = "medium"
+            return state
+
+        state.retry_count += 1
         
         # 简化的重试计划：只重新生成
         retry_plan = TaskPlan()
@@ -453,7 +519,14 @@ class SupervisorAgent:
         context.update_shared_context("need_regenerate", False)
         
         results = await self._execute_plan(state, retry_plan, context)
-        return await self._aggregate_results(state, results, context)
+        state = await self._aggregate_results(state, results, context)
+
+        if context.get_shared_context("need_regenerate", False):
+            state.handoff_required = True
+            state.handoff_reason = "quality_check_failed:max_retry_exceeded"
+            state.risk_level = "medium"
+
+        return state
     
     # =============== 工具方法 ===============
     
@@ -464,3 +537,6 @@ class SupervisorAgent:
     def get_available_experts(self) -> List[AgentRole]:
         """获取所有可用的专家"""
         return list(self.message_bus.get_all_agents().keys())
+
+    def _role_value(self, role: Any) -> str:
+        return role.value if hasattr(role, "value") else str(role)

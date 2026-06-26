@@ -19,7 +19,8 @@ from src.multi_agent.experts import (
     GeneratorExpert,
     ReviewerExpert,
     SafetyGuardExpert,
-    FAQExpert
+    FAQExpert,
+    ProfileExpert,
 )
 from src.graph.state import AgentState
 
@@ -62,6 +63,7 @@ class MultiAgentWorkflow:
             ReviewerExpert(self.settings),
             SafetyGuardExpert(self.settings),
             FAQExpert(self.settings),
+            ProfileExpert(self.settings),
         ]
         
         for expert in experts:
